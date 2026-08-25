@@ -333,9 +333,17 @@ class StreamDiffusion:
             x_t_latent_plus_uc = x_t_latent
 
         # do network bending
-        if self.bending_fn is not None and idx == self.bending_layer:
+        # do network bending
+        bending_fn = None
+
+        if isinstance(self.bending_fn, dict):
+            bending_fn = self.bending_fn.get(idx)
+        elif self.bending_fn is not None and idx == self.bending_layer:
+            bending_fn = self.bending_fn
+
+        if bending_fn is not None:
             x_t_latent_plus_uc = x_t_latent_plus_uc.squeeze(0)
-            x_t_latent_plus_uc = self.bending_fn(x_t_latent_plus_uc)
+            x_t_latent_plus_uc = bending_fn(x_t_latent_plus_uc)
             x_t_latent_plus_uc = x_t_latent_plus_uc.unsqueeze(0)
 
         model_pred = self.unet(
