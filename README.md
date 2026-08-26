@@ -25,6 +25,9 @@ conda install "numpy<2"
 pip install transformers==4.28.0
 pip install huggingface-hub==0.25.2
 
+# optional: for EnCodecModel support in examples/audio2video/batch.py
+pip install transformers==4.31.0
+
 python -m streamdiffusion.tools.install-tensorrt
 
 ```

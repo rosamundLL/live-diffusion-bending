@@ -3,17 +3,28 @@ Run many audio2video generations in a row
 """
 
 from pathlib import Path
+import sys
+import os
 
 import librosa.util
 
+# Ensure local imports (e.g. `utils`) resolve when running this file directly.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import utils.bending as util
 import audio2video
-from transformers import EncodecModel, AutoProcessor
+try:
+    from transformers import EncodecModel, AutoProcessor
+except ImportError:
+    EncodecModel = None
+    AutoProcessor = None
 
 
 # User Input:
-# audio_path = Path("C:\\Users\dzluk\StreamDiffusion\inputs\Breathing-drone-v2.wav")
-prompt_file_path = Path("C:\\Users\dzluk\StreamDiffusion\inputs\\test.txt")
+INPUTS_DIR = Path(os.environ.get("JAES_INPUTS_DIR", PROJECT_ROOT / "inputs"))
+prompt_file_path = Path(os.environ.get("JAES_PROMPT_FILE", INPUTS_DIR / "test.txt"))
 
 
 inputs = []
@@ -36,22 +47,42 @@ layers = [1, 420]
 w = 512
 h = 512
 
-model = EncodecModel.from_pretrained("facebook/encodec_48khz")
-processor = AutoProcessor.from_pretrained("facebook/encodec_48khz")
+audio_feature_fn = util.rms
+bend_fn = util.multiply
+
+if EncodecModel is not None and AutoProcessor is not None:
+    try:
+        model = EncodecModel.from_pretrained("facebook/encodec_48khz")
+        processor = AutoProcessor.from_pretrained("facebook/encodec_48khz")
+        audio_feature_fn = util.encodec(model, processor)
+        bend_fn = util.tensor_multiply
+        print(">>> Using EnCodec audio features")
+    except Exception as exc:
+        print(f">>> EnCodec unavailable ({exc}); falling back to RMS + multiply")
+else:
+    print(">>> EnCodecModel not available in this transformers version; falling back to RMS + multiply")
 
 audio_inputs = [
-    # Path("C:\\Users\dzluk\StreamDiffusion\inputs\Vn-ord_pont-G#4-mf.wav"),
-    # Path("C:\\Users\dzluk\StreamDiffusion\inputs\hits.wav"),
-    # Path("C:\\Users\dzluk\StreamDiffusion\inputs\\bowl.wav"),
-    # Path("C:\\Users\dzluk\StreamDiffusion\inputs\\Brahms.wav"),
-    # Path("C:\\Users\dzluk\StreamDiffusion\inputs\\Beethoven_Coriolan.wav"),
-    # Path("C:\\Users\dzluk\StreamDiffusion\inputs\Diner.wav"),
-    Path("C:\\Users\dzluk\StreamDiffusion\inputs\Singularity.wav"),
-    # Path("C:\\Users\dzluk\StreamDiffusion\inputs\handmade\Singularity_amp.wav"),
-    # Path("C:\\Users\dzluk\StreamDiffusion\inputs\handmade\Singularity_noise.wav"),
-    # Path("C:\\Users\dzluk\StreamDiffusion\inputs\handmade\Singularity_sine.wav"),
-    # Path("C:\\Users\dzluk\StreamDiffusion\inputs\Ghosts.wav")
+    INPUTS_DIR / "Singularity.wav",
 ]
+
+audio_inputs_override = os.environ.get("JAES_AUDIO_FILES")
+if audio_inputs_override:
+    audio_inputs = [Path(p.strip()) for p in audio_inputs_override.split(",") if p.strip()]
+
+if not prompt_file_path.exists():
+    raise FileNotFoundError(
+        f"Prompt file not found: {prompt_file_path}. "
+        f"Set JAES_PROMPT_FILE or place test.txt under {INPUTS_DIR}."
+    )
+
+missing_audio = [path for path in audio_inputs if not path.exists()]
+if missing_audio:
+    missing_list = ", ".join(str(path) for path in missing_audio)
+    raise FileNotFoundError(
+        f"Missing audio input(s): {missing_list}. "
+        f"Set JAES_AUDIO_FILES or place files under {INPUTS_DIR}."
+    )
 
 
 # for audio in librosa.util.find_files(Path("C:\\Users\dzluk\StreamDiffusion\inputs\handmade")):
@@ -80,8 +111,8 @@ for audio in audio_inputs:
                              "audio": audio,
                              "prompt": prompt_file_path,
                              "layer": layer,
-                             "bend": util.tensor_multiply,
-                             "feature": util.encodec(model, processor),
+                             "bend": bend_fn,
+                             "feature": audio_feature_fn,
                              "smoothing": util.smooth(k, a, t),
                              "seed": 42,
                              "width": w,

@@ -1,0 +1,3 @@
+# Ignore videos outputted by model to this folder when committing
+*
+!.gitignore

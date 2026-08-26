@@ -1,0 +1,3 @@
+# Ignore image frames outputted by model to this folder when committing
+*
+!.gitignore

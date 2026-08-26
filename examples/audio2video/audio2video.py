@@ -1,9 +1,11 @@
 from pathlib import Path
+import sys
 import torch
 import math
 import librosa
 from subprocess import run
 import time
+import shutil
 
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"  # this is a workaround for matplotlib
@@ -14,6 +16,11 @@ import random
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 
+# Ensure local imports (e.g. `utils`) resolve when running this file directly.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import utils.bending as util
 from utils.wrapper import StreamDiffusionWrapper
 
@@ -23,8 +30,8 @@ from utils.wrapper import StreamDiffusionWrapper
 FPS = 20
 TXT2IMG = True
 SAMPLING_RATE = 48000
-IMAGE_STORAGE_PATH = Path("./image_outputs")
-OUTPUT_VIDEO_PATH = Path("./video_outputs")
+IMAGE_STORAGE_PATH = PROJECT_ROOT / "image_outputs"
+OUTPUT_VIDEO_PATH = PROJECT_ROOT / "video_outputs"
 util.set_sampling_rate(SAMPLING_RATE)
 
 DEBUG = False
@@ -59,6 +66,10 @@ def generate_video(audio_path, prompt_file_path, layer, bend_function, audio_fea
     else:
         bend_function_name = None
     audio_feature_name = audio_feature.__name__
+    if bend_function is util.tensor_multiply and audio_feature_name != "encodec_feature":
+        print(">>> tensor_multiply expects matrix audio features; falling back to multiply")
+        bend_function = util.multiply
+        bend_function_name = bend_function.__name__
 
     # initialize paths
     OUTPUT_VIDEO_PATH.mkdir(exist_ok=True)
@@ -170,10 +181,10 @@ def generate_video(audio_path, prompt_file_path, layer, bend_function, audio_fea
     # 0:00 : First prompt
     # 0:10 : Second prompt
     # etc...
-    with open(prompt_file_path, "r") as f:
-        lines = [line.strip() for line in f.readlines()]
-        prompts = [line.split(":")[-1] for line in lines]
-        times = [float(line.split(":")[0]) * 60 + float(line.split(":")[1]) for line in lines]
+    with open(prompt_file_path, "r", encoding="utf-8-sig") as f:
+        lines = [line.strip() for line in f.readlines() if line.strip()]
+        prompts = [line.split(":", 2)[-1].strip() for line in lines]
+        times = [float(line.split(":", 2)[0]) * 60 + float(line.split(":", 2)[1]) for line in lines]
         prompt_times = [int(time * FPS) for time in times]
     num_prompts = len(prompts)
 
@@ -356,7 +367,17 @@ def generate_video(audio_path, prompt_file_path, layer, bend_function, audio_fea
         counter += 1
 
     # turn images into video
-    ffmpeg_command = ["ffmpeg",
+    ffmpeg_bin = os.environ.get("JAES_FFMPEG", "ffmpeg")
+    if Path(ffmpeg_bin).exists():
+        ffmpeg_executable = str(Path(ffmpeg_bin))
+    else:
+        ffmpeg_executable = shutil.which(ffmpeg_bin)
+    if ffmpeg_executable is None:
+        raise FileNotFoundError(
+            "ffmpeg executable not found. Install ffmpeg or set JAES_FFMPEG to the full executable path."
+        )
+
+    ffmpeg_command = [ffmpeg_executable,
                       "-y",  # automatically overwrite if output exists
                       "-framerate", str(FPS),  # set framerate
                       "-i", str(IMAGE_STORAGE_PATH) + "/%05d.png",  # set image source
@@ -364,7 +385,7 @@ def generate_video(audio_path, prompt_file_path, layer, bend_function, audio_fea
                       "-vcodec", "libx264",
                       "-pix_fmt", "yuv420p",
                       str(video_name)]
-    run(ffmpeg_command)
+    run(ffmpeg_command, check=True)
 
     print(">>> Saved video as", video_name)
     print(">>> Generated {} images".format(num_frames))

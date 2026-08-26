@@ -1,6 +1,7 @@
 import gc
 import os
 from pathlib import Path
+import sys
 import traceback
 from typing import List, Literal, Optional, Union, Dict, Callable
 
@@ -8,6 +9,12 @@ import numpy as np
 import torch
 from diffusers import AutoencoderTiny, StableDiffusionPipeline
 from PIL import Image
+
+# Prefer this repo's vendored streamdiffusion package over any globally installed one.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 from streamdiffusion import StreamDiffusion
 from streamdiffusion.image_utils import postprocess_image
