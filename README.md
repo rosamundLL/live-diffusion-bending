@@ -1,3 +1,23 @@
+# Live Diffusion Bending
+
+This repository is a research fork of [JAES2025](https://github.com/dzluke/JAES2025), extending the original network bending pipeline toward live audio-visual performance.
+
+The current prototype extracts live audio features on a local machine and sends them over UDP to a remote GPU machine running StreamDiffusion-based image generation. The received features are mapped to network bending parameters so that sound can influence the generated visuals in real time.
+
+Current features:
+- RMS / loudness mapping
+- Spectral centroid mapping
+- Onset detection
+- Chroma and chroma-strength mapping
+- Circle-of-fifths chroma mapping experiments
+- Smoothed chroma transitions
+- Fixed noise and audio-driven noise walk for temporal stability
+
+This work is experimental and focuses on live feature-to-visual mapping rather than fine-tuning an audio-conditioned diffusion model.
+
+## Original Project
+The original JAES2025 project and paper information are preserved below.
+
 # Generating Music Reactive Videos by Applying Network Bending to Stable Diffusion
 Luke Dzwonczyk, Carmine-Emanuele Cella, and David Ban | Journal of the Audio Engineering Society, June 2025
 
