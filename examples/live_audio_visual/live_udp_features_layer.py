@@ -4,6 +4,7 @@ import socket
 import sys
 import time
 import math
+import random
 
 import cv2
 import numpy as np
@@ -30,6 +31,35 @@ def scale_clamped(value, in_min, in_max, out_min, out_max):
     value = min(max(value, in_min), in_max)
     t = (value - in_min) / (in_max - in_min)
     return out_min + t * (out_max - out_min)
+
+
+def read_prompt_file(path):
+    if not path or not os.path.exists(path):
+        return None
+
+    with open(path, "r", encoding="utf-8") as f:
+        prompt = f.read().strip()
+
+    if prompt == "":
+        return None
+
+    return prompt
+
+
+def poll_prompt_file(path, last_mtime):
+    if not path or not os.path.exists(path):
+        return None, last_mtime
+
+    mtime = os.path.getmtime(path)
+
+    if last_mtime is None:
+        return None, mtime
+
+    if mtime <= last_mtime:
+        return None, last_mtime
+
+    prompt = read_prompt_file(path)
+    return prompt, mtime
 
 
 def parse_feature_message(text, state):
@@ -72,15 +102,31 @@ def recv_latest_features(sock, state):
     return state
 
 
+def rotate_x_safe(amount):
+    def fn(x):
+        c = np.cos(amount)
+        s = np.sin(amount)
+        rotation_matrix = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, c, -s, 0.0],
+            [0.0, s, c, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+        op = torch.tensor(rotation_matrix, device=x.device, dtype=x.dtype)
+        return torch.tensordot(op, x, dims=1)
+
+    return fn
+
+
 def rotate_y_safe(amount):
     def fn(x):
         c = np.cos(amount)
         s = np.sin(amount)
         rotation_matrix = [
-            [c, 0, s, 0],
-            [0, 1, 0, 0],
-            [-1 * s, 0, c, 0],
-            [0, 0, 0, 1],
+            [c, 0.0, s, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [-s, 0.0, c, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
         ]
         op = torch.tensor(rotation_matrix, device=x.device, dtype=x.dtype)
         return torch.tensordot(op, x, dims=1)
@@ -112,23 +158,28 @@ def make_centroid_bending_fn(centroid_amount):
     return rotate_y_safe(centroid_amount)
 
 
+def make_onset_bending_fn(onset_pulse, onset_bend_max):
+    amount = onset_pulse * onset_bend_max
+    return rotate_x_safe(amount)
+
+
 def chroma_to_circle_of_fifths_amount(chroma_index, chroma_strength, chroma_bend_max):
     chroma_index = int(chroma_index) % 12
     chroma_strength = float(chroma_strength)
 
     circle_of_fifths_rank = {
-        0: 0,    # C
-        7: 1,    # G
-        2: 2,    # D
-        9: 3,    # A
-        4: 4,    # E
-        11: 5,   # B
-        6: 6,    # F#
-        1: 7,    # C#
-        8: 8,    # G#
-        3: 9,    # D#
-        10: 10,  # A#
-        5: 11,   # F
+        0: 0,
+        7: 1,
+        2: 2,
+        9: 3,
+        4: 4,
+        11: 5,
+        6: 6,
+        1: 7,
+        8: 8,
+        3: 9,
+        10: 10,
+        5: 11,
     }
 
     rank = circle_of_fifths_rank[chroma_index]
@@ -138,11 +189,6 @@ def chroma_to_circle_of_fifths_amount(chroma_index, chroma_strength, chroma_bend
 
 def make_chroma_bending_fn(chroma_amount):
     return rotate_y_safe(chroma_amount)
-
-
-def make_onset_bending_fn(onset_pulse, onset_bend_max):
-    amount = onset_pulse * onset_bend_max
-    return bend_util.add_full(amount)
 
 
 def update_chroma_stability(
@@ -204,6 +250,54 @@ def add_bending_fn(bending_map, layer, bending_fn):
         bending_map[layer] = compose_bending_fns(bending_map[layer], bending_fn)
     else:
         bending_map[layer] = bending_fn
+
+
+def encode_prompt_embedding(stream_wrapper, prompt):
+    encoder_output = stream_wrapper.stream.pipe.encode_prompt(
+        prompt=prompt,
+        device=stream_wrapper.stream.device,
+        num_images_per_prompt=1,
+        do_classifier_free_guidance=False,
+        negative_prompt="",
+    )
+
+    prompt_embeds = encoder_output[0].repeat(stream_wrapper.stream.batch_size, 1, 1)
+    return prompt_embeds.to(
+        device=stream_wrapper.stream.device,
+        dtype=stream_wrapper.stream.dtype,
+    )
+
+
+class PromptEmbeddingTransition:
+    def __init__(self):
+        self.start_embedding = None
+        self.end_embedding = None
+        self.total_frames = 0
+        self.step = 0
+        self.active = False
+
+    def start(self, start_embedding, end_embedding, total_frames):
+        self.start_embedding = start_embedding.detach().clone()
+        self.end_embedding = end_embedding.detach().clone()
+        self.total_frames = max(int(total_frames), 1)
+        self.step = 0
+        self.active = True
+
+    def next_embedding(self):
+        if not self.active:
+            return None
+
+        alpha = float(self.step + 1) / float(self.total_frames)
+        alpha = min(max(alpha, 0.0), 1.0)
+
+        embedding = (1.0 - alpha) * self.start_embedding + alpha * self.end_embedding
+
+        self.step += 1
+        if self.step >= self.total_frames:
+            self.active = False
+            embedding = self.end_embedding
+
+        return embedding
 
 
 class NoisePath:
@@ -271,6 +365,16 @@ def pil_to_bgr(image):
     return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
 
+def prepare_stream_prompt(stream, prompt, bending_map, input_noise):
+    stream.prepare(
+        prompt=prompt,
+        num_inference_steps=50,
+        bending_fn=bending_map,
+        bending_layer=None,
+        input_noise=input_noise,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -282,6 +386,9 @@ def main():
         "--prompt",
         default="one centered colorful geometric crystal, single faceted object, symmetric shape, simple dark background, stable composition, abstract, vivid",
     )
+    parser.add_argument("--prompt-file", default=None)
+    parser.add_argument("--prompt-transition-frames", type=int, default=60)
+
     parser.add_argument("--width", type=int, default=384)
     parser.add_argument("--height", type=int, default=384)
     parser.add_argument("--target-fps", type=float, default=6.0)
@@ -299,7 +406,7 @@ def main():
 
     parser.add_argument("--rms-layer", type=int, default=3, choices=[0, 1, 2, 3])
     parser.add_argument("--centroid-layer", type=int, default=2, choices=[0, 1, 2, 3])
-    parser.add_argument("--onset-layer", type=int, default=1, choices=[0, 1, 2, 3])
+    parser.add_argument("--onset-layer", type=int, default=0, choices=[0, 1, 2, 3])
     parser.add_argument("--chroma-layer", type=int, default=1, choices=[0, 1, 2, 3])
 
     parser.add_argument("--onset-bend-max", type=float, default=0.8)
@@ -317,12 +424,28 @@ def main():
     parser.add_argument("--noise-mode", default="walk", choices=["fixed", "random", "walk"])
     parser.add_argument("--noise-seed", type=int, default=1234)
     parser.add_argument("--noise-walk-step", type=float, default=0.006)
-    parser.add_argument("--seed", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--lock-seed-each-frame", action="store_true")
 
     args = parser.parse_args()
 
+    if args.seed is None:
+        args.seed = random.randint(0, 999999)
+        print(f"Using random run seed: {args.seed}")
+    else:
+        print(f"Using user seed: {args.seed}")
+
     if args.fixed_noise:
         args.noise_mode = "fixed"
+
+    file_prompt = read_prompt_file(args.prompt_file)
+    if file_prompt is not None:
+        args.prompt = file_prompt
+
+    current_prompt = args.prompt
+    last_prompt_mtime = None
+    if args.prompt_file and os.path.exists(args.prompt_file):
+        last_prompt_mtime = os.path.getmtime(args.prompt_file)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((args.udp_host, args.udp_port))
@@ -333,8 +456,14 @@ def main():
         f"RMS layer={args.rms_layer}; "
         f"centroid layer={args.centroid_layer}; "
         f"onset layer={args.onset_layer}; "
-        f"chroma layer={args.chroma_layer}"
+        f"chroma layer={args.chroma_layer}; "
+        f"onset -> rotate_x"
     )
+    print(f"Prompt: {current_prompt}")
+    if args.prompt_file:
+        print(f"Watching prompt file: {args.prompt_file}")
+    print(f"Prompt transition frames: {args.prompt_transition_frames}")
+    print(f"Lock seed each frame: {args.lock_seed_each_frame}")
 
     stream = StreamDiffusionWrapper(
         model_id_or_path=args.model_id_or_path,
@@ -364,13 +493,14 @@ def main():
     add_bending_fn(initial_bending_map, args.onset_layer, make_onset_bending_fn(0.0, args.onset_bend_max))
     add_bending_fn(initial_bending_map, args.chroma_layer, make_chroma_bending_fn(0.0))
 
-    stream.prepare(
-        prompt=args.prompt,
-        num_inference_steps=50,
-        bending_fn=initial_bending_map,
-        bending_layer=None,
-        input_noise=noise_path.next(),
+    prepare_stream_prompt(
+        stream,
+        current_prompt,
+        initial_bending_map,
+        noise_path.next(),
     )
+
+    prompt_transition = PromptEmbeddingTransition()
 
     state = {
         "rms": 0.0,
@@ -507,23 +637,49 @@ def main():
         audio_activity = max(stable_chroma_strength, onset_pulse, rms_activity)
 
         noise = noise_path.next(activity=audio_activity)
-        output = render_frame(stream, noise, seed=args.seed)
+
+        new_prompt, last_prompt_mtime = poll_prompt_file(args.prompt_file, last_prompt_mtime)
+        if new_prompt is not None and new_prompt != current_prompt:
+            print(f"Prompt changed: {new_prompt}")
+
+            start_embedding = stream.stream.prompt_embeds.detach().clone()
+            end_embedding = encode_prompt_embedding(stream, new_prompt)
+
+            prompt_transition.start(
+                start_embedding,
+                end_embedding,
+                args.prompt_transition_frames,
+            )
+
+            current_prompt = new_prompt
+
+        transition_embedding = prompt_transition.next_embedding()
+        if transition_embedding is not None:
+            stream.stream.prompt_embeds = transition_embedding
+
+        frame_seed = args.seed if args.lock_seed_each_frame else None
+        output = render_frame(stream, noise, seed=frame_seed)
         frame = pil_to_bgr(output)
+
+        short_prompt = current_prompt[:58] + "..." if len(current_prompt) > 58 else current_prompt
+        transition_status = "on" if prompt_transition.active else "off"
 
         hud1 = f"RMS {smooth_state['rms']:.4f}  {db:6.1f} dB  mult {rms_amount:.2f}"
         hud2 = f"centroid {smooth_state['centroid']:.0f} Hz  rotY {centroid_amount:.2f}"
-        hud3 = f"onset {state.get('onset', 0.0):.0f}  pulse {onset_pulse:.2f}"
+        hud3 = f"onset {state.get('onset', 0.0):.0f}  pulse {onset_pulse:.2f}  rotX {onset_pulse * args.onset_bend_max:.2f}"
         hud4 = (
             f"raw chroma {int(state['chroma'])} {state['chroma_strength']:.2f}  "
             f"stable {stable_chroma} {stable_chroma_strength:.2f}"
         )
         hud5 = f"chroma smooth amount {smooth_chroma_amount:.2f}  activity {audio_activity:.2f}"
+        hud6 = f"prompt transition {transition_status}: {short_prompt}"
 
         cv2.putText(frame, hud1, (18, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
         cv2.putText(frame, hud2, (18, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
         cv2.putText(frame, hud3, (18, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
         cv2.putText(frame, hud4, (18, 132), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
         cv2.putText(frame, hud5, (18, 164), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
+        cv2.putText(frame, hud6, (18, 196), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
         cv2.imshow("live_udp_features_layer", frame)
 
