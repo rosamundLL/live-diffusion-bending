@@ -1,20 +1,28 @@
 # Live Diffusion Bending
 
-This repository is a research fork of [JAES2025](https://github.com/dzluke/JAES2025), extending the original network bending pipeline toward live audio-visual performance.
+This repository is a research fork of [JAES2025](https://github.com/dzluke/JAES2025), extending the original offline network bending pipeline toward live audio-visual performance.
 
 The current prototype extracts live audio features on a local machine and sends them over UDP to a remote GPU machine running StreamDiffusion-based image generation. The received features are mapped to network bending parameters so that sound can influence the generated visuals in real time.
 
+This version also supports live prompt changes during runtime. The GPU receiver can watch a local `live_prompt.txt` file, and editing/saving that file updates the text prompt without restarting the program. Instead of using a simple frame crossfade, the prototype interpolates between prompt embeddings so that the image transitions more gradually from one visual scene to another.
+
 Current features:
+- UDP-based feature transmission from a local audio machine to a remote GPU machine
 - RMS / loudness mapping
 - Spectral centroid mapping
-- Onset detection
+- Onset detection and onset-based visual hits
 - Chroma and chroma-strength mapping
 - Circle-of-fifths chroma mapping experiments
 - Smoothed chroma transitions
 - Fixed noise and audio-driven noise walk for temporal stability
+- Live prompt change using `live_prompt.txt`
+- Prompt embedding interpolation for smoother scene transitions
+- Run-level seed control for stable visuals within a session while allowing different results across runs
 
-This work is experimental and focuses on live feature-to-visual mapping rather than fine-tuning an audio-conditioned diffusion model.
+This work is experimental and focuses on live feature-to-visual mapping and prompt-conditioned network bending rather than fine-tuning an audio-conditioned diffusion model.
 
+## Original Project
+The original JAES2025 project and paper information are preserved below.
 ## Original Project
 The original JAES2025 project and paper information are preserved below.
 
